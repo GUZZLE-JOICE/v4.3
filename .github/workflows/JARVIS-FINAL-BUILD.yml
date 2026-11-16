@@ -1,0 +1,131 @@
+name: Build JARVIS V4.3 Installed Windows App
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download repository
+        uses: actions/checkout@v6
+
+      - name: Stamp this revision (4.3.N goes up by one every build)
+        shell: pwsh
+        run: |
+          $version = "4.3.$env:GITHUB_RUN_NUMBER"
+          "JARVIS_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          foreach ($file in @("jarvis_browser.py", "jarvis_v2.html")) {
+            $text = [System.IO.File]::ReadAllText($file)
+            $text = $text.Replace("jarvis-v4.3.0-", "jarvis-v$version-")
+            [System.IO.File]::WriteAllText($file, $text, (New-Object System.Text.UTF8Encoding $false))
+          }
+          Write-Host "Building J.A.R.V.I.S. $version"
+
+      - name: Set up stable Python builder
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build and MCP dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "mcp[cli]>=2.0.0,<3"
+
+      - name: Verify the modules before packaging
+        shell: pwsh
+        run: |
+          python -c "import typer; import mcp; import mcp.client.auth; import mcp.client.streamable_http; import mcp.shared.auth; print('MCP + typer imports OK')"
+          python -c "import playwright.sync_api; import uiautomation; import pyautogui; import pyperclip; import webview; print('Desktop + native window imports OK')"
+
+      - name: Build native JARVIS application payload
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin `
+            --name JARVIS `
+            --collect-all playwright `
+            --collect-all uiautomation `
+            --collect-all comtypes `
+            --hidden-import httpx2 `
+            --hidden-import mcp `
+            --hidden-import mcp.client.auth `
+            --hidden-import mcp.client.streamable_http `
+            --hidden-import mcp.shared.auth `
+            --hidden-import pyautogui `
+            --hidden-import pyperclip `
+            --hidden-import pypdf `
+            --hidden-import docx `
+            --hidden-import webview.platforms.edgechromium `
+            --hidden-import tkinter `
+            --hidden-import jarvis_overlay `
+            --hidden-import jarvis_business `
+            --hidden-import jarvis_evolution `
+            --hidden-import jarvis_accounts `
+            --hidden-import jarvis_local_tools `
+            --hidden-import jarvis_research `
+            --hidden-import jarvis_desktop_agent `
+            --hidden-import jarvis_remote_server `
+            --add-data "jarvis_v2.html:." `
+            --add-data "brain.js:." `
+            --add-data "lab.js:." `
+            --add-data "tools.js:." `
+            --add-data "jarvis_web.html:." `
+            --add-data "jarvis_server_config.json:." `
+            --add-data "manifest.webmanifest:." `
+            --add-data "service-worker.js:." `
+            --add-data "browser_extension:browser_extension" `
+            jarvis_app.py
+
+      - name: Verify native app payload
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/JARVIS.exe")) { throw "App payload was not produced" }
+          $size = (Get-Item "dist/JARVIS.exe").Length
+          if ($size -lt 1000000) { throw "EXE is unexpectedly small" }
+          Write-Host "Native app payload ready ($size bytes)"
+
+      - name: Build Windows MSI installer
+        shell: pwsh
+        run: |
+          dotnet --info
+          dotnet build installer/JARVIS.Installer.wixproj --configuration Release -p:JarvisVersion=$env:JARVIS_VERSION
+          New-Item -ItemType Directory -Force -Path installer-output | Out-Null
+          $msis = @(Get-ChildItem installer/bin/Release -Filter *.msi -File -Recurse)
+          if ($msis.Count -ne 1) { throw "Expected exactly one MSI installer, found $($msis.Count)" }
+          $msi = $msis[0]
+          Copy-Item $msi.FullName installer-output/JARVIS_V4_3_CLASSIC_APP.msi
+
+      - name: Verify MSI database and embedded application payload
+        id: verify_msi
+        shell: pwsh
+        run: |
+          $result = ./installer/Verify-Msi.ps1 `
+            -MsiPath "installer-output/JARVIS_V4_3_CLASSIC_APP.msi" `
+            -ExpectedPayloadPath "dist/JARVIS.exe"
+          "msi_sha256=$($result.MsiSha256)" >> $env:GITHUB_OUTPUT
+          "msi_bytes=$($result.MsiBytes)" >> $env:GITHUB_OUTPUT
+          @"
+          ## J.A.R.V.I.S. MSI verified
+
+          - Version: $env:JARVIS_VERSION
+          - File: `JARVIS_V4_3_CLASSIC_APP.msi`
+          - Bytes: $($result.MsiBytes)
+          - SHA-256: `$($result.MsiSha256)`
+          - Validation: Compound File signature, Windows Installer database, administrative extraction, and extracted EXE hash all passed.
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload installed JARVIS app
+        uses: actions/upload-artifact@v7
+        with:
+          # v7 uploads this one MSI as the raw file (not a ZIP). With
+          # archive: false the artifact service uses the source file name.
+          path: installer-output/JARVIS_V4_3_CLASSIC_APP.msi
+          if-no-files-found: error
+          retention-days: 14
+          archive: false
