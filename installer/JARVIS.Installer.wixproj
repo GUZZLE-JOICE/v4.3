@@ -1,0 +1,9 @@
+<Project Sdk="WixToolset.Sdk/6.0.2">
+  <PropertyGroup>
+    <OutputType>Package</OutputType>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <JarvisExePath>$(MSBuildProjectDirectory)\..\dist\JARVIS.exe</JarvisExePath>
+    <JarvisVersion Condition="'$(JarvisVersion)' == ''">4.3.0</JarvisVersion>
+    <DefineConstants>JarvisExePath=$(JarvisExePath);JarvisVersion=$(JarvisVersion)</DefineConstants>
+  </PropertyGroup>
+</Project>
