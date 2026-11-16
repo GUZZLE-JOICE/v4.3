@@ -22,7 +22,7 @@ if ($msi.Length -lt 1MB) {
 }
 
 # An MSI is an OLE Compound File. This detects a ZIP or error response
-# mislabeled as an MSI before it is uploaded as an artifact.
+# mislabeled as an MSI before it is uploaded as a release artifact.
 $stream = [System.IO.File]::OpenRead($msi.FullName)
 try {
     $header = New-Object byte[] 8
@@ -46,7 +46,7 @@ try {
         throw 'Windows Installer automation is unavailable on this runner.'
     }
     $installer = [Activator]::CreateInstance($installerType)
-    $database = $installer.OpenDatabase($msi.FullName, 0) # Read only
+    $database = $installer.OpenDatabase($msi.FullName, 0)
     $view = $database.OpenView("SELECT `Value` FROM `Property` WHERE `Property` = 'ProductCode'")
     $view.Execute()
     $record = $view.Fetch()
@@ -64,11 +64,33 @@ finally {
 
 # Extract the MSI administrative image without installing the product.
 $adminTarget = Join-Path ([System.IO.Path]::GetTempPath()) ("jarvis-msi-verify-" + [guid]::NewGuid())
+$adminLog = Join-Path ([System.IO.Path]::GetTempPath()) ("jarvis-msi-admin-" + [guid]::NewGuid() + ".log")
 try {
     New-Item -ItemType Directory -Path $adminTarget | Out-Null
-    & "$env:SystemRoot\System32\msiexec.exe" /a $msi.FullName /qn "TARGETDIR=$adminTarget"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Windows Installer administrative extraction failed with exit code $LASTEXITCODE."
+
+    # Capture Process.ExitCode directly; $LASTEXITCODE was unset in the failed run.
+    $msiexecPath = Join-Path $env:SystemRoot 'System32\msiexec.exe'
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $msiexecPath
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+
+    foreach ($argument in @('/a', $msi.FullName, '/qn', '/l*v', $adminLog, "TARGETDIR=$adminTarget")) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.WaitForExit()
+    $adminExitCode = $process.ExitCode
+    $process.Dispose()
+
+    if ($adminExitCode -ne 0) {
+        $logExcerpt = if (Test-Path -LiteralPath $adminLog) {
+            (Get-Content -LiteralPath $adminLog -Tail 80 | Out-String).Trim()
+        } else {
+            "Windows Installer did not create its verbose log at: $adminLog"
+        }
+        throw "Windows Installer administrative extraction failed with exit code $adminExitCode.`nMSI log: $adminLog`n$logExcerpt"
     }
 
     $extracted = Get-ChildItem -LiteralPath $adminTarget -Filter JARVIS.exe -File -Recurse |
@@ -87,8 +109,8 @@ finally {
 }
 
 [pscustomobject]@{
-    MsiPath      = $msi.FullName
-    MsiSha256    = Get-FileSha256 $msi.FullName
-    MsiBytes     = $msi.Length
+    MsiPath       = $msi.FullName
+    MsiSha256     = Get-FileSha256 $msi.FullName
+    MsiBytes      = $msi.Length
     PayloadSha256 = Get-FileSha256 $payload.FullName
 }
